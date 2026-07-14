@@ -1,0 +1,55 @@
+# Ignore raw and intermediate data
+raw/
+intermediate/
+processed/
+outputs/
+
+# Ignore large data files and binary formats
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pl2
+*.plx
+*.mat
+*.edf
+*.tdms
+*.avi
+*.mp4
+*.mov
+*.wav
+*.mp3
+*.csv
+*.nwb  
+*.pdf
+*.pptx
+*.png
+
+# Ignore NWB files if stored locally
+*.nwb
+
+# Ignore SQLite or database files
+*.sqlite
+*.db
+
+# Ignore Python cache and Jupyter notebook checkpoints
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+*.egg-info/
+
+# Ignore virtual environments and package lock files
+env/
+.venv/
+venv/
+Pipfile.lock
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore logs and temporary files
+*.log
+*.bak
+*.tmp
+.snakemake/
