@@ -23,7 +23,15 @@ outputs/
 *.nwb  
 *.pdf
 *.pptx
+*.xlsx
+*.zip
+*.tar.gz
+*.tar
+*.jpg
 *.png
+*.tif
+
+
 
 # Ignore NWB files if stored locally
 *.nwb
