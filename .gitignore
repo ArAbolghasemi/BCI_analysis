@@ -30,6 +30,8 @@ outputs/
 *.jpg
 *.png
 *.tif
+*.gif
+*.docx
 
 
 

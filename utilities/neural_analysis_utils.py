@@ -123,6 +123,59 @@ def get_active_reward_frames(r, day: str) -> np.ndarray:
     return np.asarray(rtt[key], dtype=float).ravel()
 
 
+def load_cursor(r, day: str) -> np.ndarray:
+    """Logged WaveSurfer cursor signal for ``day`` (frame-aligned to neural data, 30 Hz)."""
+    return np.asarray(r["data_ws"][day].load()["cursor"], dtype=float).ravel()
+
+
+def max_value_in_intervals(signal: np.ndarray, intervals: Sequence[tuple[int, int]]) -> np.ndarray:
+    """Max of a 1-D signal within each ``(start, end)`` interval (frame units)."""
+    signal = np.asarray(signal, dtype=float)
+    out = []
+    for s, e in intervals:
+        s, e = int(s), min(int(e), len(signal))
+        out.append(np.nanmax(signal[s:e]) if e > s else np.nan)
+    return np.array(out)
+
+
+def load_weight_percentage(experiment_log_path, mouse_name: str, day_list: Sequence[str]) -> dict:
+    """Per-day mouse-weight percentage from ``RH + GH experiment log.xlsx``.
+
+    Ports the two-row-header parsing from ``first_pass_analysis.ipynb``: the sheet
+    named after the mouse has a category header row plus an identifier row; the
+    weight column is ``Mouse weight_%`` and the ``Date`` column is matched to the
+    ``YYYYMMDD`` day keys. Returns ``{day: weight_fraction}`` (nan if missing)."""
+    import datetime
+    xls = pd.ExcelFile(experiment_log_path)
+    if mouse_name not in xls.sheet_names:
+        return {d: np.nan for d in day_list}
+    df = pd.read_excel(experiment_log_path, sheet_name=mouse_name).dropna(how="all").dropna(axis=1, how="all")
+    ident = df.iloc[0, :].values
+    names = list(df.columns.str.replace(r"Unnamed: \d+", "", regex=True).str.strip())
+    cat = ""
+    for i in range(len(names)):
+        if names[i] == "":
+            names[i] = "date" if i == 0 else cat
+        else:
+            cat = names[i]
+        if not pd.isna(ident[i]):
+            names[i] = f"{names[i]}_{ident[i]}"
+    df.columns = names
+    df = df.drop(df.index[0])
+    if "Date" not in df.columns:
+        return {d: np.nan for d in day_list}
+    df["date_converted"] = [
+        x.strftime("%Y%m%d") if isinstance(x, (datetime.datetime, pd.Timestamp)) and not pd.isna(x) else None
+        for x in df["Date"]
+    ]
+    wcols = [c for c in df.columns if "weight" in c.lower() and "%" in c]
+    out = {}
+    for d in day_list:
+        v = df.loc[df["date_converted"] == d, wcols[0]].values if wcols else []
+        out[d] = float(v[0]) if len(v) else np.nan
+    return out
+
+
 # ---------------------------------------------------------------------------
 # trial table
 # ---------------------------------------------------------------------------
@@ -163,6 +216,86 @@ def get_true_bmi_trials(trials_df: pd.DataFrame) -> Trials:
         factor=t["factor_to_use"].to_numpy(dtype=float),
         block=t["blockNum"].to_numpy(dtype=float),
     )
+
+
+@dataclass
+class Block:
+    """One contiguous run of trials sharing the same decoder axis (``factor_to_use``)."""
+    factor: float
+    first_trial: int
+    last_trial: int
+    start_frame: float
+    end_frame: float
+
+    @property
+    def n_trials(self) -> int:
+        return self.last_trial - self.first_trial + 1
+
+
+def segment_factor_blocks(trials: Trials) -> list[Block]:
+    """Split a session into contiguous blocks of constant ``factor_to_use``.
+
+    On remapping days in this dataset every session is ``(2, 3, 2)``: an intuitive
+    block, the rotated ("new") block, and a washout block back on the intuitive
+    axis. Uses the factor label only -- never the (unreliable) decoder weights."""
+    fac = trials.factor
+    idx = np.where(np.isfinite(fac))[0]
+    if idx.size == 0:
+        return []
+    f = fac[idx]
+    changes = np.where(np.diff(f) != 0)[0]
+    out, s = [], 0
+    for c in list(changes) + [len(f) - 1]:
+        i0, i1 = idx[s], idx[c]
+        out.append(Block(float(f[s]), int(i0), int(i1), float(trials.start[i0]), float(trials.end[i1])))
+        s = c + 1
+    return out
+
+
+# per-timepoint state labels used by the continuous-trajectory visualisation
+STATE_ITI, STATE_CORRECT, STATE_INCORRECT, STATE_REWARD = 0, 1, 2, 3
+STATE_NAMES = {STATE_ITI: "iti/baseline", STATE_CORRECT: "correct trial",
+               STATE_INCORRECT: "incorrect trial", STATE_REWARD: "reward/consumption"}
+
+
+def label_timepoints(trials: Trials, n_timepoints: int, *, reward_frames: Optional[Sequence[float]] = None,
+                     reward_dur_sec: float = 7.0, sr: float = 30.0) -> np.ndarray:
+    """Per-timepoint state label array (see ``STATE_*``) for a whole session.
+
+    Painted in order ITI -> trials (correct/incorrect) -> reward consumption, so a
+    reward window overrides the trial tail it follows. Units follow whatever the
+    inputs use (pass bin-unit trials and ``sr=SR_BINNED`` for binned data)."""
+    lab = np.full(int(n_timepoints), STATE_ITI, dtype=np.int8)
+    for s, e, ok in zip(trials.start, trials.end, trials.success):
+        if not (np.isfinite(s) and np.isfinite(e)):
+            continue
+        s_i, e_i = max(int(round(s)), 0), min(int(round(e)), int(n_timepoints))
+        if e_i > s_i:
+            lab[s_i:e_i] = STATE_CORRECT if ok == 1 else STATE_INCORRECT
+    if reward_frames is not None:
+        w = int(round(reward_dur_sec * sr))
+        for rf in np.asarray(reward_frames, dtype=float).ravel():
+            if not np.isfinite(rf):
+                continue
+            s_i, e_i = max(int(round(rf)), 0), min(int(round(rf)) + w, int(n_timepoints))
+            if e_i > s_i:
+                lab[s_i:e_i] = STATE_REWARD
+    return lab
+
+
+def radius_of_gyration(X: np.ndarray) -> float:
+    """RMS distance of points from their centroid -- a scale measure of how much
+    state space a stretch of activity covers. ``X`` is ``(samples, dims)``."""
+    if X.shape[0] < 2:
+        return np.nan
+    return float(np.sqrt(np.sum(X.var(axis=0))))
+
+
+def path_speed(X: np.ndarray) -> float:
+    """Mean Euclidean step size between consecutive samples of ``(samples, dims)``."""
+    if X.shape[0] < 2:
+        return np.nan
+    return float(np.mean(np.linalg.norm(np.diff(X, axis=0), axis=1)))
 
 
 def remapping_start_frame(trials: Trials) -> Optional[float]:
@@ -208,6 +341,46 @@ def preprocess_session(
         sd[sd < eps] = 1.0
         x = (x - mu) / sd
     return x
+
+
+def bin_session(neural: np.ndarray, bin_size_frames: int) -> np.ndarray:
+    """Non-overlapping temporal averaging: ``(N, T)`` -> ``(N, T // bin)``.
+
+    Preferred over Gaussian smoothing for dimensionality: smoothing injects
+    autocorrelation between neighbouring frames, so when the PCA/FA design matrix
+    is randomly subsampled the samples are not independent and the estimated
+    dimensionality is biased downward. Binning yields genuinely down-sampled,
+    near-independent samples at an effective rate ``SR / bin_size_frames``."""
+    x = np.nan_to_num(np.asarray(neural, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    b = int(bin_size_frames)
+    if b <= 1:
+        return x
+    N, T = x.shape
+    T2 = (T // b) * b
+    return x[:, :T2].reshape(N, T2 // b, b).mean(axis=2)
+
+
+def bin_and_zscore(neural: np.ndarray, bin_size_frames: int, *, zscore: bool = True,
+                   eps: float = 1e-9) -> np.ndarray:
+    """Bin a session (non-overlapping mean) then per-neuron z-score."""
+    x = bin_session(neural, bin_size_frames)
+    if zscore:
+        mu = x.mean(axis=1, keepdims=True)
+        sd = x.std(axis=1, keepdims=True)
+        sd[sd < eps] = 1.0
+        x = (x - mu) / sd
+    return x
+
+
+def bin_trials(trials: "Trials", bin_size_frames: int) -> "Trials":
+    """Return a copy of a :class:`Trials` with start/end frames rescaled to bins."""
+    b = float(bin_size_frames)
+    return Trials(trials.start / b, trials.end / b, trials.success, trials.factor, trials.block)
+
+
+def bin_frames(frames: Sequence[float], bin_size_frames: int) -> np.ndarray:
+    """Rescale frame indices (e.g. reward frames) to bin units."""
+    return np.asarray(frames, dtype=float) / float(bin_size_frames)
 
 
 # ---------------------------------------------------------------------------
