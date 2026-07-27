@@ -698,6 +698,27 @@ class TrajectoryStats:
     var_per_meanpath: float    # var_raw / variance of the mean trajectory (length-deconfounded)
 
 
+def trajectory_variance_matched(trajs: Sequence[np.ndarray], n_trials: int, *,
+                                n_resample: int = 50, n_boot: int = 10, seed: int = 0) -> tuple[float, float]:
+    """Cross-trial trajectory variance estimated at a **fixed trial count**.
+
+    Raw cross-trial variance grows with the number of trials available (more
+    trials sample the tails better), so days with different trial counts are not
+    directly comparable. This subsamples ``n_trials`` trajectories ``n_boot``
+    times and returns ``(mean, sd)`` of the variance across bootstraps. Returns
+    ``(nan, nan)`` if fewer than ``n_trials`` usable trajectories exist."""
+    trajs = [t for t in trajs if t.shape[0] >= 2]
+    if len(trajs) < n_trials or n_trials < 2:
+        return np.nan, np.nan
+    R = np.stack([resample_trajectory(t, n_resample) for t in trajs], axis=0)  # (n, P, k)
+    vals = []
+    for b in range(n_boot):
+        rng = np.random.RandomState(seed + b)
+        idx = rng.choice(R.shape[0], n_trials, replace=False)
+        vals.append(float(np.mean(np.sum(R[idx].var(axis=0, ddof=1), axis=1))))
+    return float(np.mean(vals)), float(np.std(vals, ddof=1) if n_boot > 1 else 0.0)
+
+
 def trajectory_stats(trajs: Sequence[np.ndarray], *, n_resample: int = 50) -> TrajectoryStats:
     """Trajectory length + trial-to-trial variability, de-confounded from length.
 
