@@ -435,16 +435,62 @@ def reward_consumption_intervals(reward_frames: Sequence[float], T: int, *,
     return out
 
 
-def baseline_intervals(trials: Trials, T: int, *, exclude_sec: float = 10.0,
-                       sr: int = 30, min_len_sec: float = 1.0) -> list[tuple[int, int]]:
-    """Baseline: contiguous stretches with no trial start within +/- ``exclude_sec``.
+def effective_trial_end(trials: Trials, *, reward_frames: Optional[Sequence[float]] = None,
+                        miss_dur_sec: float = 20.0, sr: float = 30.0,
+                        reward_tol_sec: float = 2.0) -> np.ndarray:
+    """When each trial really ends, per the project definition.
 
-    Returns intervals at least ``min_len_sec`` long."""
+    * **correct trial** -> the **reward time**: the first active reward at/after the
+      logged trial end (reward is delivered ~0.4 s after threshold crossing). Falls
+      back to the logged ``trials.end`` if no reward is matched or none supplied.
+    * **incorrect trial** -> ``start + miss_dur_sec`` (the trial times out at 20 s).
+
+    Returns a float array aligned to ``trials`` (nan where start/end are missing)."""
+    end = np.full(len(trials), np.nan, dtype=float)
+    rf = np.sort(np.asarray(reward_frames, dtype=float).ravel()) if reward_frames is not None else None
+    tol = reward_tol_sec * sr
+    miss_w = miss_dur_sec * sr
+    for i, (s, e, ok) in enumerate(zip(trials.start, trials.end, trials.success)):
+        if not np.isfinite(s):
+            continue
+        if ok == 1:
+            base = e if np.isfinite(e) else s
+            if rf is not None and rf.size:
+                j = np.searchsorted(rf, base)          # first reward at/after threshold crossing
+                if j < rf.size and rf[j] - base <= tol:
+                    end[i] = rf[j]
+                    continue
+            end[i] = base
+        else:
+            end[i] = s + miss_w
+    return end
+
+
+def baseline_intervals(trials: Trials, T: int, *, exclude_sec: float = 10.0,
+                       sr: float = 30.0, min_len_sec: float = 1.0,
+                       reward_frames: Optional[Sequence[float]] = None,
+                       miss_dur_sec: float = 20.0) -> list[tuple[int, int]]:
+    """Baseline: timepoints at least ``exclude_sec`` away from **any trial**.
+
+    A baseline timepoint must be at least ``exclude_sec`` *before the start of the
+    next trial* and at least ``exclude_sec`` *after the end of the previous trial*,
+    where a trial occupies ``[start, effective_end]`` and the effective end is the
+    **reward time** for a correct trial or ``start + miss_dur_sec`` (20 s timeout)
+    for an incorrect one -- see :func:`effective_trial_end`.
+
+    So each trial blanks ``[start - exclude_sec, effective_end + exclude_sec]``.
+    Returns contiguous surviving stretches at least ``min_len_sec`` long."""
     keep = np.ones(T, dtype=bool)
     half = int(round(exclude_sec * sr))
-    for s in trials.start[np.isfinite(trials.start)]:
-        s = int(round(s))
-        keep[max(0, s - half): min(T, s + half + 1)] = False
+    ends = effective_trial_end(trials, reward_frames=reward_frames,
+                               miss_dur_sec=miss_dur_sec, sr=sr)
+    for s, e in zip(trials.start, ends):
+        if not (np.isfinite(s) and np.isfinite(e)):
+            continue
+        lo = max(0, int(round(s)) - half)
+        hi = min(T, int(round(e)) + half + 1)
+        if hi > lo:
+            keep[lo:hi] = False
     # contiguous True runs
     out = []
     min_len = int(round(min_len_sec * sr))
