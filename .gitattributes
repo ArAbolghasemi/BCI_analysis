@@ -1,0 +1,7 @@
+# Notebooks go into git WITHOUT their outputs: code and prose are versioned, figures are not.
+# The stripping is done by tools/nb_strip_outputs.py, wired in as a "clean" filter. The filter
+# itself is defined in .git/config, which is machine-local and not committed, so a fresh clone
+# has to run tools/install_nb_filter.sh once before notebooks are stripped on commit.
+#
+# Your working copy keeps every figure. Only what git STORES is stripped.
+*.ipynb filter=nbstrip text eol=lf
