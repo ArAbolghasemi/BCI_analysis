@@ -5,3 +5,10 @@
 #
 # Your working copy keeps every figure. Only what git STORES is stripped.
 *.ipynb filter=nbstrip text eol=lf
+#
+# THE ONE TRAP: git now hands back notebooks without outputs. Editing and committing is safe,
+# but anything that REWRITES a notebook in your working tree -- `git checkout <file>`,
+# `git stash`, a pull or merge that touches it -- replaces it with the stripped version, and
+# the figures you had locally are gone until you re-run the notebook. Nothing in git is lost;
+# the figures simply were never in there. Outputs committed before 2026-11-04 are still in
+# history: `git show 3541da5:first_pass_analysis.ipynb`.
