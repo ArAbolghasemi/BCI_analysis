@@ -42,7 +42,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-__all__ = ["find_day", "load_sync", "CamSync", "FrameFeed", "ffmpeg_exe"]
+__all__ = ["find_day", "load_sync", "CamSync", "FrameFeed", "panel_shape", "probe_size",
+           "seek_is_exact", "ffmpeg_exe"]
 
 # The galvo reset is a single huge negative step, but it straddles two samples about a quarter
 # of the time. Detect generously and merge, or a strict threshold silently drops ~3000 frames
@@ -283,6 +284,27 @@ def probe_size(mp4):
     return int(m.group(1)), int(m.group(2))
 
 
+def _geom(mp4, width, crop):
+    """(out_w, out_h, crop_filter). One place, so a layout's idea of the frame shape and
+    ffmpeg's can never drift apart."""
+    sw, sh = probe_size(mp4)
+    cropf = ""
+    if crop is not None:                     # (x0, x1, y0, y1) as fractions of the frame
+        x0, x1, y0, y1 = crop
+        cx, cy = int(sw * x0) // 2 * 2, int(sh * y0) // 2 * 2
+        cw, ch = int(sw * (x1 - x0)) // 2 * 2, int(sh * (y1 - y0)) // 2 * 2
+        cropf, sw, sh = f"crop={cw}:{ch}:{cx}:{cy},", cw, ch
+    w = int(width)
+    return w, int(round(sh * w / sw / 2.0)) * 2, cropf
+
+
+def panel_shape(mp4, width, crop=None):
+    """(w, h) a FrameFeed would hand back, without opening one -- so a layout can be sized
+    from the real frame shapes instead of a guess."""
+    w, h, _ = _geom(mp4, width, crop)
+    return w, h
+
+
 class FrameFeed:
     """Hand back the frame nearest each requested index, from ONE sequential ffmpeg pass.
 
@@ -299,16 +321,7 @@ class FrameFeed:
     def __init__(self, mp4, first, last, width, stride=2, fps_nominal=120.0, gray=True,
                  crop=None):
         self.mp4, self.stride, self.fps = Path(mp4), int(max(stride, 1)), float(fps_nominal)
-        sw, sh = probe_size(mp4)
-        cropf = ""
-        if crop is not None:                 # (x0, x1, y0, y1) as fractions of the frame
-            x0, x1, y0, y1 = crop
-            cx, cy = int(sw * x0) // 2 * 2, int(sh * y0) // 2 * 2
-            cw, ch = int(sw * (x1 - x0)) // 2 * 2, int(sh * (y1 - y0)) // 2 * 2
-            cropf = f"crop={cw}:{ch}:{cx}:{cy},"
-            sw, sh = cw, ch
-        self.w = int(width)
-        self.h = int(round(sh * self.w / sw / 2.0)) * 2
+        self.w, self.h, cropf = _geom(mp4, width, crop)
         self.gray = bool(gray)
         self.bpp = 1 if gray else 3
         self.first = int(max(first, 0))
